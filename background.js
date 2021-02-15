@@ -22,14 +22,23 @@ class PinboardClient {
   }
 }
 
-async function ensurePinboardFolder(bookmarks) {
+async function ensureEmptyPinboardFolder() {
+  const bookmarks = await browser.bookmarks.getTree()
+
   const otherBookmarksFolder = bookmarks[0].children.find(b => b.id === 'unfiled_____')
 
-  if (otherBookmarksFolder.children.find(b => b.title === 'Pinboard')) {
-    return
+  const pinboardFolder = otherBookmarksFolder.children.find(b => b.title === 'Pinboard')
+
+  if (pinboardFolder) {
+    await Promise.all(
+      pinboardFolder.children.map(node => {
+        browser.bookmarks.removeTree(node.id)
+      })
+    )
+    return pinboardFolder
   }
 
-  await browser.bookmarks.create({
+  return browser.bookmarks.create({
     title: 'Pinboard'
   })
 }
@@ -39,9 +48,7 @@ async function ensurePinboardFolder(bookmarks) {
   const pinboardClient = new PinboardClient(pinboard_access_token)
   const pinboardBookrmarks = await pinboardClient.posts('all')
 
-  const bookmarks = await browser.bookmarks.getTree()
-  await ensurePinboardFolder(bookmarks)
+  const pinboardFolder = await ensureEmptyPinboardFolder()
 
   console.log(pinboardBookrmarks)
-  console.log(bookmarks)
 })()

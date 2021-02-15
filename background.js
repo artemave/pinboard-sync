@@ -1,13 +1,3 @@
-async function getAccessToken() {
-  return await browser.storage.sync.get("pinboard_access_token")
-}
-
-
-async function getJson(url) {
-  const response = await fetch(url)
-  return await response.json()
-}
-
 class PinboardClient {
   constructor(pinboard_access_token) {
     this.pinboard_access_token = pinboard_access_token
@@ -20,6 +10,15 @@ class PinboardClient {
   apiUrl(action) {
     return `https://api.pinboard.in/v1/posts/${action}?auth_token=${this.pinboard_access_token}&format=json`;
   }
+}
+
+async function getAccessToken() {
+  return await browser.storage.sync.get("pinboard_access_token")
+}
+
+async function getJson(url) {
+  const response = await fetch(url)
+  return await response.json()
 }
 
 async function ensureEmptyPinboardFolder() {
@@ -43,6 +42,21 @@ async function ensureEmptyPinboardFolder() {
   })
 }
 
+const ensureFolder = async (name, parentId) => {
+  const bookmarks = await browser.bookmarks.getSubTree(parentId)
+
+  const existingFolder = bookmarks[0].children.find(b => b.title === name && b.type === 'folder')
+
+  if (existingFolder) {
+    return existingFolder
+  }
+
+  return browser.bookmarks.create({
+    parentId,
+    title: name,
+  })
+}
+
 (async () => {
   const {pinboard_access_token} = await getAccessToken()
   const pinboardClient = new PinboardClient(pinboard_access_token)
@@ -50,5 +64,25 @@ async function ensureEmptyPinboardFolder() {
 
   const pinboardFolder = await ensureEmptyPinboardFolder()
 
-  console.log(pinboardBookrmarks)
+  for (const b of pinboardBookrmarks) {
+    if (b.tags) {
+      await Promise.all(
+        b.tags.split(' ').map(async tag => {
+          const tagFolder = await ensureFolder(tag, pinboardFolder.id)
+
+          return browser.bookmarks.create({
+            parentId: tagFolder.id,
+            url: b.href,
+            title: b.description,
+          })
+        })
+      )
+    } else {
+      await browser.bookmarks.create({
+        parentId: pinboardFolder.id,
+        url: b.href,
+        title: b.description,
+      })
+    }
+  }
 })()

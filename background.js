@@ -1,14 +1,27 @@
+const cache = {}
+
+async function createBrowserBookmarkOrFolder(args) {
+  const bookmarkOrFolder = await browser.bookmarks.create(args)
+  cache[bookmarkOrFolder.id] = bookmarkOrFolder
+  return bookmarkOrFolder
+}
+
 class PinboardClient {
   constructor(pinboard_access_token) {
     this.pinboard_access_token = pinboard_access_token
   }
 
-  async posts(action) {
-    return getJson(this.apiUrl(action))
+  async posts() {
+    return getJson(this.apiUrl('posts/all'))
+  }
+
+  async renameTag({from, to}) {
+    const url = this.apiUrl('tags/rename')
+    return getJson(`${url}&old=${encodeURIComponent(from)}&new=${encodeURIComponent(to)}`)
   }
 
   apiUrl(action) {
-    return `https://api.pinboard.in/v1/posts/${action}?auth_token=${this.pinboard_access_token}&format=json`;
+    return `https://api.pinboard.in/v1/${action}?auth_token=${this.pinboard_access_token}&format=json`;
   }
 }
 
@@ -37,7 +50,7 @@ async function ensureEmptyPinboardFolder() {
     return pinboardFolder
   }
 
-  return browser.bookmarks.create({
+  return createBrowserBookmarkOrFolder({
     title: 'Pinboard'
   })
 }
@@ -51,16 +64,28 @@ const ensureFolder = async (name, parentId) => {
     return existingFolder
   }
 
-  return browser.bookmarks.create({
+  return createBrowserBookmarkOrFolder({
     parentId,
     title: name,
   })
 }
 
 (async () => {
+  async function updatePinboardBookmarkOrTag(id) {
+    const bookmarkOrTag = (await browser.bookmarks.get(id))[0]
+    const oldVersion = cache[id]
+
+    if (bookmarkOrTag.type === 'folder' && bookmarkOrTag.title != oldVersion.title) {
+      await pinboardClient.renameTag({from: oldVersion.title, to: bookmarkOrTag.title})
+    } else {
+      console.log('something else');
+    }
+    cache[id] = bookmarkOrTag
+  }
+
   const {pinboard_access_token} = await getAccessToken()
   const pinboardClient = new PinboardClient(pinboard_access_token)
-  const pinboardBookrmarks = await pinboardClient.posts('all')
+  const pinboardBookrmarks = await pinboardClient.posts()
 
   const pinboardFolder = await ensureEmptyPinboardFolder()
 
@@ -70,7 +95,7 @@ const ensureFolder = async (name, parentId) => {
         b.tags.split(' ').map(async tag => {
           const tagFolder = await ensureFolder(tag, pinboardFolder.id)
 
-          return browser.bookmarks.create({
+          return createBrowserBookmarkOrFolder({
             parentId: tagFolder.id,
             url: b.href,
             title: b.description,
@@ -78,11 +103,13 @@ const ensureFolder = async (name, parentId) => {
         })
       )
     } else {
-      await browser.bookmarks.create({
+      await createBrowserBookmarkOrFolder({
         parentId: pinboardFolder.id,
         url: b.href,
         title: b.description,
       })
     }
   }
+
+  browser.bookmarks.onChanged.addListener(updatePinboardBookmarkOrTag)
 })()

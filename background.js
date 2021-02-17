@@ -186,6 +186,10 @@ const ensureFolder = async (name, parentId) => {
     await pinboardClient.addPost(pinboardBookrmark)
   }
 
+  async function removePinboardBookmark(_id, {node: {url}}) {
+    await pinboardClient.deletePost(url)
+  }
+
   const {pinboard_access_token} = await getAccessToken()
   const pinboardClient = new PinboardClient(pinboard_access_token)
   const pinboardBookrmarks = await pinboardClient.posts()
@@ -219,4 +223,6 @@ const ensureFolder = async (name, parentId) => {
   // As a result, we need `onMoved` callback to set the tag (in case user chooses folder in the popup)
   browser.bookmarks.onCreated.addListener(createPinboardBookmark)
   browser.bookmarks.onMoved.addListener(updateTag)
+
+  browser.bookmarks.onRemoved.addListener(removePinboardBookmark)
 })()

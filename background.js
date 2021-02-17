@@ -1,9 +1,14 @@
+// if (!window.hasOwnProperty('browser')) {
+//   window.browser = window.chrome
+// }
+
 const cache = {}
 
-async function createBrowserBookmarkOrFolder(args) {
-  const bookmarkOrFolder = await browser.bookmarks.create(args)
-  cache[bookmarkOrFolder.id] = bookmarkOrFolder
-  return bookmarkOrFolder
+function pick(object, ...props) {
+  return props.reduce((result, prop) => {
+    result[prop] = object[prop]
+    return result
+  }, {})
 }
 
 class PinboardClient {
@@ -15,6 +20,24 @@ class PinboardClient {
     return getJson(this.apiUrl('posts/all'))
   }
 
+  async getPost(url) {
+    return (await getJson(`${this.apiUrl('posts/get')}&url=${encodeURIComponent(url)}`)).posts[0]
+  }
+
+  async addPost(params) {
+    let url = this.apiUrl('posts/add')
+    for (const param in params) {
+      if (params[param]) {
+        url += `&${param}=${encodeURIComponent(params[param])}`
+      }
+    }
+    return getJson(url)
+  }
+
+  async deletePost(url) {
+    return getJson(`${this.apiUrl('posts/delete')}&url=${encodeURIComponent(url)}`)
+  }
+
   async renameTag({from, to}) {
     const url = this.apiUrl('tags/rename')
     return getJson(`${url}&old=${encodeURIComponent(from)}&new=${encodeURIComponent(to)}`)
@@ -23,6 +46,12 @@ class PinboardClient {
   apiUrl(action) {
     return `https://api.pinboard.in/v1/${action}?auth_token=${this.pinboard_access_token}&format=json`;
   }
+}
+
+async function createBrowserBookmarkOrFolder(args) {
+  const bookmarkOrFolder = await browser.bookmarks.create(args)
+  cache[bookmarkOrFolder.id] = bookmarkOrFolder
+  return bookmarkOrFolder
 }
 
 async function getAccessToken() {
@@ -75,10 +104,28 @@ const ensureFolder = async (name, parentId) => {
     const bookmarkOrTag = (await browser.bookmarks.get(id))[0]
     const oldVersion = cache[id]
 
-    if (bookmarkOrTag.type === 'folder' && bookmarkOrTag.title != oldVersion.title) {
+    // Ignore changes to the root folder
+    if (bookmarkOrTag.parentId === 'unfiled_____') {
+      return
+    }
+
+    if (bookmarkOrTag.type === 'folder') {
       await pinboardClient.renameTag({from: oldVersion.title, to: bookmarkOrTag.title})
-    } else {
-      console.log('something else');
+
+    } else if (bookmarkOrTag.title !== oldVersion.title || bookmarkOrTag.url !== oldVersion.url) {
+      const pinboardBookrmark = await pinboardClient.getPost(oldVersion.url)
+      await pinboardClient.deletePost(oldVersion.url)
+
+      const postParams = Object.assign(
+        {
+          url: bookmarkOrTag.url,
+          description: bookmarkOrTag.title,
+          dt: pinboardBookrmark.time,
+        },
+        pick(pinboardBookrmark, 'tags', 'extended', 'shared', 'toread')
+      )
+
+      await pinboardClient.addPost(postParams)
     }
     cache[id] = bookmarkOrTag
   }

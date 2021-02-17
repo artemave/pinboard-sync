@@ -17,11 +17,11 @@ class PinboardClient {
   }
 
   async posts() {
-    return getJson(this.apiUrl('posts/all'))
+    return this.getJson(this.apiUrl('posts/all'))
   }
 
   async getPost(url) {
-    return (await getJson(`${this.apiUrl('posts/get')}&url=${encodeURIComponent(url)}`)).posts[0]
+    return (await this.getJson(`${this.apiUrl('posts/get')}&url=${encodeURIComponent(url)}`)).posts[0]
   }
 
   async addPost(params) {
@@ -31,20 +31,34 @@ class PinboardClient {
         url += `&${param}=${encodeURIComponent(params[param])}`
       }
     }
-    return getJson(url)
+    return this.getJson(url)
   }
 
   async deletePost(url) {
-    return getJson(`${this.apiUrl('posts/delete')}&url=${encodeURIComponent(url)}`)
+    return this.getJson(`${this.apiUrl('posts/delete')}&url=${encodeURIComponent(url)}`)
   }
 
   async renameTag({from, to}) {
     const url = this.apiUrl('tags/rename')
-    return getJson(`${url}&old=${encodeURIComponent(from)}&new=${encodeURIComponent(to)}`)
+    return this.getJson(`${url}&old=${encodeURIComponent(from)}&new=${encodeURIComponent(to)}`)
   }
 
   apiUrl(action) {
-    return `https://api.pinboard.in/v1/${action}?auth_token=${this.pinboard_access_token}&format=json`;
+    return `https://api.pinboard.in/v1/${action}?auth_token=${this.pinboard_access_token}&format=json`
+  }
+
+  async getJson(url) {
+    return this.enqueue(() => getJson(url))
+  }
+
+  // Pinboard API is really slow - queue requests to avoid race conditions
+  async enqueue(fn) {
+    if (this.queue) {
+      this.queue = this.queue.finally(() => this.enqueue(fn))
+    } else {
+      this.queue = fn().finally(() => delete this.queue)
+    }
+    return this.queue
   }
 }
 
@@ -130,6 +144,48 @@ const ensureFolder = async (name, parentId) => {
     cache[id] = bookmarkOrTag
   }
 
+  async function createPinboardBookmark(_id, {title, url}) {
+    // Ignore creating folders
+    if (!url) return
+
+    await pinboardClient.addPost({
+      url,
+      description: title,
+    })
+  }
+
+  async function updateTag(id, {parentId, oldParentId}) {
+    const [bookmark] = await browser.bookmarks.get(id)
+
+    const pinboardBookrmark = await pinboardClient.getPost(bookmark.url)
+
+    console.log('pinboardBookrmark', pinboardBookrmark)
+    if (!pinboardBookrmark) return
+
+    const [newParentFolder] = await browser.bookmarks.get(parentId)
+    const [oldParentFolder] = await browser.bookmarks.get(oldParentId)
+    const [newPinboardFolder] = await browser.bookmarks.get(newParentFolder.parentId)
+    const [oldPinboardFolder] = await browser.bookmarks.get(oldParentFolder.parentId)
+
+    const isNewFoldarTag = newPinboardFolder?.title === 'Pinboard' ? newParentFolder.title : ''
+    const isOldFoldarTag = oldPinboardFolder?.title === 'Pinboard' ? oldParentFolder.title : ''
+
+    const tagToAdd = isNewFoldarTag ? newParentFolder.title : ''
+    const tagToRemove = isOldFoldarTag ? oldParentFolder.title : ''
+
+    if (!tagToAdd && !tagToRemove) return
+
+    const updatedTags = pinboardBookrmark.tags.split(' ').filter(t => t && t !== tagToRemove).concat(tagToAdd).join(' ')
+
+    if (updatedTags === pinboardBookrmark.tags) return
+
+    pinboardBookrmark.tags = updatedTags
+    pinboardBookrmark.url = pinboardBookrmark.href
+
+    await pinboardClient.deletePost(pinboardBookrmark.url)
+    await pinboardClient.addPost(pinboardBookrmark)
+  }
+
   const {pinboard_access_token} = await getAccessToken()
   const pinboardClient = new PinboardClient(pinboard_access_token)
   const pinboardBookrmarks = await pinboardClient.posts()
@@ -159,4 +215,8 @@ const ensureFolder = async (name, parentId) => {
   }
 
   browser.bookmarks.onChanged.addListener(updatePinboardBookmarkOrTag)
+  // In FF a bookmark is added right after the star button is pressed (before user presses Save button in the popup!)
+  // As a result, we need `onMoved` callback to set the tag (in case user chooses folder in the popup)
+  browser.bookmarks.onCreated.addListener(createPinboardBookmark)
+  browser.bookmarks.onMoved.addListener(updateTag)
 })()

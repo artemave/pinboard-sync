@@ -1,4 +1,6 @@
-# pinterest-sync
+# pinboard-sync
+
+Firefox add-on: https://addons.mozilla.org/en-US/firefox/addon/pinboard-sync/
 
 ## Description
 

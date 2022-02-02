@@ -21,6 +21,10 @@ class PinboardClient {
   }
 
   async getPost(url) {
+    if (!url) {
+      consloe.log('getPost', 'skipping empty url')
+      return
+    }
     return (await this.getJson(`${this.apiUrl('posts/get')}&url=${encodeURIComponent(url)}`)).posts[0]
   }
 
@@ -35,10 +39,18 @@ class PinboardClient {
   }
 
   async deletePost(url) {
+    if (!url) {
+      consloe.log('deletePost', 'skipping empty url')
+      return
+    }
     return this.getJson(`${this.apiUrl('posts/delete')}&url=${encodeURIComponent(url)}`)
   }
 
   async renameTag({from, to}) {
+    if (!from) {
+      console.log('renameTag', 'skipping empty from:')
+      return
+    }
     const url = this.apiUrl('tags/rename')
     return this.getJson(`${url}&old=${encodeURIComponent(from)}&new=${encodeURIComponent(to)}`)
   }
@@ -62,8 +74,45 @@ class PinboardClient {
   }
 }
 
-async function createBrowserBookmarkOrFolder(args) {
-  const bookmarkOrFolder = await browser.bookmarks.create(args)
+async function ensureFirefoxUpdatedNewFolderTitle(folder) {
+  return new Promise((resolve, reject) => {
+    const i = setInterval(() => {
+      browser.bookmarks.get(folder.id).then(([freshFolder]) => {
+        console.log('freshFolder.title', freshFolder.title)
+        if (freshFolder.title !== 'New Folder') {
+          clearInterval(i)
+          clearTimeout(t)
+          resolve(freshFolder)
+        }
+      })
+    }, 100)
+
+    const t = setTimeout(() => {
+      console.log('ensureFirefoxUpdatedNewFolderTitle', 'timed out')
+      clearInterval(i)
+      resolve(folder)
+    }, 20000)
+  })
+}
+
+async function isInPinboardFolder(id) {
+  const [item] = await browser.bookmarks.get(id)
+
+  if (!item.parentId) {
+    return false
+  }
+
+  const [parent] = await browser.bookmarks.get(item.parentId)
+
+  if (parent.title === 'Pinboard') {
+    return true
+  }
+
+  return isInPinboardFolder(parent.id)
+}
+
+async function createBrowserBookmarkOrFolder({url, title, parentId}) {
+  const bookmarkOrFolder = await browser.bookmarks.create({parentId, title, url})
   cache[bookmarkOrFolder.id] = bookmarkOrFolder
   return bookmarkOrFolder
 }
@@ -99,9 +148,9 @@ async function ensureEmptyPinboardFolder() {
 }
 
 const ensureFolder = async (name, parentId) => {
-  const bookmarks = await browser.bookmarks.getSubTree(parentId)
+  const [parent] = await browser.bookmarks.getSubTree(parentId)
 
-  const existingFolder = bookmarks[0].children.find(b => b.title === name && b.type === 'folder')
+  const existingFolder = parent.children.find(b => b.title === name && b.type === 'folder')
 
   if (existingFolder) {
     return existingFolder
@@ -115,88 +164,156 @@ const ensureFolder = async (name, parentId) => {
 
 (async () => {
   async function updatePinboardBookmarkOrTag(id) {
-    const bookmarkOrTag = (await browser.bookmarks.get(id))[0]
-    const oldVersion = cache[id]
+    if (!(await isInPinboardFolder(id))) return
 
-    // Ignore changes to the root folder
-    if (bookmarkOrTag.parentId === 'unfiled_____') {
-      return
-    }
+    const oldVersion = cache[id]
+    if (!oldVersion) return
+
+    const [bookmarkOrTag] = await browser.bookmarks.get(id)
+    console.log('updatePinboardBookmarkOrTag', {bookmarkOrTag, oldVersion})
 
     if (bookmarkOrTag.type === 'folder') {
       await pinboardClient.renameTag({from: oldVersion.title, to: bookmarkOrTag.title})
 
     } else if (bookmarkOrTag.title !== oldVersion.title || bookmarkOrTag.url !== oldVersion.url) {
-      const pinboardBookrmark = await pinboardClient.getPost(oldVersion.url)
-      await pinboardClient.deletePost(oldVersion.url)
-
+      const pinboardBookmark = await pinboardClient.getPost(oldVersion.url)
       const postParams = Object.assign(
         {
           url: bookmarkOrTag.url,
           description: bookmarkOrTag.title,
-          dt: pinboardBookrmark.time,
+          dt: pinboardBookmark.time,
         },
-        pick(pinboardBookrmark, 'tags', 'extended', 'shared', 'toread')
+        pick(pinboardBookmark, 'tags', 'extended', 'shared', 'toread')
       )
 
       await pinboardClient.addPost(postParams)
+
+      if (oldVersion.url && bookmarkOrTag.url !== oldVersion.url) {
+        await pinboardClient.deletePost(oldVersion.url)
+      }
     }
     cache[id] = bookmarkOrTag
   }
 
-  async function createPinboardBookmark(_id, {title, url}) {
-    // Ignore creating folders
+  async function updatePinboardBookmarkTags(id, {parentId, oldParentId}) {
+    if (!(await isInPinboardFolder(id))) return
+
+    const [bookmark] = await browser.bookmarks.get(id)
+
+    console.log('updateTag', {bookmark, parentId, oldParentId})
+
+    if (!bookmark.url) {
+      console.log('Skipping folder')
+      return
+    }
+
+    let pinboardBookmark = await pinboardClient.getPost(bookmark.url)
+
+    console.log('pinboardBookmark', pinboardBookmark)
+
+    if (!pinboardBookmark) {
+      pinboardBookmark = {
+        url: bookmark.url,
+        description: bookmark.title,
+        tags: ''
+      }
+    } else {
+      let [newParentFolder] = await browser.bookmarks.get(parentId)
+      const [oldParentFolder] = await browser.bookmarks.get(oldParentId)
+      console.log({newParentFolder, oldParentFolder})
+
+      const [newRootFolder] = await browser.bookmarks.get(newParentFolder.parentId)
+      const [oldRootFolder] = await browser.bookmarks.get(oldParentFolder.parentId)
+      console.log({newRootFolder, oldRootFolder})
+
+      const isNewRootChild = newRootFolder?.title === 'Pinboard'
+      const isOldRootChild = oldRootFolder?.title === 'Pinboard'
+
+      // If user creates new folder, then here we see 'New Folder' as opposed to the name
+      // user has given it.
+      if (newParentFolder.title === 'New Folder') {
+        newParentFolder = await ensureFirefoxUpdatedNewFolderTitle(newParentFolder)
+      }
+
+      const tagToAdd = isNewRootChild && newParentFolder.title != 'New Folder' ? newParentFolder.title : null
+      const tagToRemove = isOldRootChild ? oldParentFolder.title : null
+
+      const updatedTags = pinboardBookmark.tags
+        .split(' ')
+        .filter(t => t && t !== tagToRemove)
+        .concat(tagToAdd)
+        .filter(Boolean)
+        .join(' ')
+
+      if (updatedTags === pinboardBookmark.tags) return
+
+      pinboardBookmark.tags = updatedTags
+      pinboardBookmark.url = pinboardBookmark.href
+    }
+
+    await pinboardClient.addPost(pinboardBookmark)
+  }
+
+  /*
+  "{
+    \"id\": \"gzO74eOYa1rJ\",
+    \"parentId\": \"toolbar_____\",
+    \"index\": 4,
+    \"title\": \"BEST METAL & PROG ROCK ALBUMS OF 2021 | METALISED!\",
+    \"dateAdded\": 1643660290019,
+    \"type\": \"bookmark\",
+    \"url\": \"https://metalised.wordpress.com/2022/01/17/best-metal-prog-rock-albums-of-2021/\"
+  }"
+  */
+  async function createPinboardBookmark(id, {title, url, parentId}) {
+    // Don't create folders
     if (!url) return
+
+    if (!(await isInPinboardFolder(id))) return
+
+    console.log('createPinboardBookmark', {title, url, parentId})
+
+    const existingPinboardBookmark = await pinboardClient.getPost(url)
+    const tags = []
+    if (existingPinboardBookmark) {
+      tags.concat(existingPinboardBookmark.tags.split(' '))
+    }
+
+    const [parentFolder] = await browser.bookmarks.get(parentId)
+    const [rootFolder] = await browser.bookmarks.get(parentFolder.parentId)
+    const isParentInPinboardFilder = rootFolder?.title === 'Pinboard'
+    if (isParentInPinboardFilder) {
+      tags.concat(parentFolder.title)
+    }
 
     await pinboardClient.addPost({
       url,
       description: title,
+      tags: tags.filter(Boolean).join(' ')
     })
+    cache[id] = (await browser.bookmarks.get(id))[0]
   }
 
-  async function updateTag(id, {parentId, oldParentId}) {
-    const [bookmark] = await browser.bookmarks.get(id)
+  async function removePinboardBookmark(id, {node: {url, parentId}}) {
+    const [parent] = await browser.bookmarks.get(parentId)
 
-    const pinboardBookrmark = await pinboardClient.getPost(bookmark.url)
+    if (parent.title !== 'Pinboard' && !(await isInPinboardFolder(parentId))) {
+      return
+    }
 
-    console.log('pinboardBookrmark', pinboardBookrmark)
-    if (!pinboardBookrmark) return
-
-    const [newParentFolder] = await browser.bookmarks.get(parentId)
-    const [oldParentFolder] = await browser.bookmarks.get(oldParentId)
-    const [newPinboardFolder] = await browser.bookmarks.get(newParentFolder.parentId)
-    const [oldPinboardFolder] = await browser.bookmarks.get(oldParentFolder.parentId)
-
-    const isNewFoldarTag = newPinboardFolder?.title === 'Pinboard' ? newParentFolder.title : ''
-    const isOldFoldarTag = oldPinboardFolder?.title === 'Pinboard' ? oldParentFolder.title : ''
-
-    const tagToAdd = isNewFoldarTag ? newParentFolder.title : ''
-    const tagToRemove = isOldFoldarTag ? oldParentFolder.title : ''
-
-    if (!tagToAdd && !tagToRemove) return
-
-    const updatedTags = pinboardBookrmark.tags.split(' ').filter(t => t && t !== tagToRemove).concat(tagToAdd).join(' ')
-
-    if (updatedTags === pinboardBookrmark.tags) return
-
-    pinboardBookrmark.tags = updatedTags
-    pinboardBookrmark.url = pinboardBookrmark.href
-
-    await pinboardClient.deletePost(pinboardBookrmark.url)
-    await pinboardClient.addPost(pinboardBookrmark)
-  }
-
-  async function removePinboardBookmark(_id, {node: {url}}) {
+    console.log('removePinboardBookmark', {id, url})
     await pinboardClient.deletePost(url)
+    delete cache[id]
   }
 
   const {pinboard_access_token} = await getAccessToken()
   const pinboardClient = new PinboardClient(pinboard_access_token)
-  const pinboardBookrmarks = await pinboardClient.posts()
+  const pinboardBookmarks = await pinboardClient.posts()
+  console.log('pinboardBookmarks', pinboardBookmarks)
 
   const pinboardFolder = await ensureEmptyPinboardFolder()
 
-  for (const b of pinboardBookrmarks) {
+  for (const b of pinboardBookmarks) {
     if (b.tags) {
       await Promise.all(
         b.tags.split(' ').map(async tag => {
@@ -218,11 +335,11 @@ const ensureFolder = async (name, parentId) => {
     }
   }
 
-  browser.bookmarks.onChanged.addListener(updatePinboardBookmarkOrTag)
   // In FF a bookmark is added right after the star button is pressed (before user presses Save button in the popup!)
-  // As a result, we need `onMoved` callback to set the tag (in case user chooses folder in the popup)
-  browser.bookmarks.onCreated.addListener(createPinboardBookmark)
-  browser.bookmarks.onMoved.addListener(updateTag)
-
-  browser.bookmarks.onRemoved.addListener(removePinboardBookmark)
+  // When a user finally presses Save, then, if they chose a folder, an `onMoved` event is fired.
+  // At that point, we know both the bookmark and the tag, so we can add it to pinboard.
+  browser.bookmarks.onCreated.addListener((...args) => createPinboardBookmark(...args).catch(console.error))
+  browser.bookmarks.onMoved.addListener((...args) => updatePinboardBookmarkTags(...args).catch(console.error))
+  browser.bookmarks.onChanged.addListener((...args) => updatePinboardBookmarkOrTag(...args).catch(console.error))
+  browser.bookmarks.onRemoved.addListener((...args) => removePinboardBookmark(...args).catch(console.error))
 })()

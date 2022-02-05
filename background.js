@@ -22,7 +22,7 @@ class PinboardClient {
 
   async getPost(url) {
     if (!url) {
-      consloe.log('getPost', 'skipping empty url')
+      console.log('getPost', 'skipping empty url')
       return
     }
     return (await this.getJson(`${this.apiUrl('posts/get')}&url=${encodeURIComponent(url)}`)).posts[0]
@@ -40,7 +40,7 @@ class PinboardClient {
 
   async deletePost(url) {
     if (!url) {
-      consloe.log('deletePost', 'skipping empty url')
+      console.log('deletePost', 'skipping empty url')
       return
     }
     return this.getJson(`${this.apiUrl('posts/delete')}&url=${encodeURIComponent(url)}`)
@@ -135,9 +135,9 @@ async function ensureEmptyPinboardFolder() {
 
   if (pinboardFolder) {
     await Promise.all(
-      pinboardFolder.children.map(node => {
-        browser.bookmarks.removeTree(node.id)
-      })
+      pinboardFolder.children.map(
+        node => browser.bookmarks.removeTree(node.id)
+      )
     )
     return pinboardFolder
   }
@@ -177,6 +177,13 @@ const ensureFolder = async (name, parentId) => {
 
     } else if (bookmarkOrTag.title !== oldVersion.title || bookmarkOrTag.url !== oldVersion.url) {
       const pinboardBookmark = await pinboardClient.getPost(oldVersion.url)
+
+      if (!pinboardBookmark) {
+        console.log(`Pinboard bookmark not found: ${oldVersion.url}`)
+        delete cache[id]
+        return
+      }
+
       const postParams = Object.assign(
         {
           url: bookmarkOrTag.url,
@@ -189,7 +196,8 @@ const ensureFolder = async (name, parentId) => {
       await pinboardClient.addPost(postParams)
 
       if (oldVersion.url && bookmarkOrTag.url !== oldVersion.url) {
-        await pinboardClient.deletePost(oldVersion.url)
+        oldVersion.pinboardBookmark = pinboardBookmark
+        await removePinboardBookmarkOrTag(id, {node: oldVersion})
       }
     }
     cache[id] = bookmarkOrTag
@@ -276,7 +284,7 @@ const ensureFolder = async (name, parentId) => {
     const existingPinboardBookmark = await pinboardClient.getPost(url)
     const tags = []
     if (existingPinboardBookmark) {
-      tags.concat(existingPinboardBookmark.tags.split(' '))
+      tags.concat(existingPinboardBookmark.tags.split(' ').filter(Boolean))
     }
 
     const [parentFolder] = await browser.bookmarks.get(parentId)
@@ -294,16 +302,35 @@ const ensureFolder = async (name, parentId) => {
     cache[id] = (await browser.bookmarks.get(id))[0]
   }
 
-  async function removePinboardBookmark(id, {node: {url, parentId}}) {
+  async function removePinboardBookmarkOrTag(id, {node: {url, parentId, pinboardBookmark}}) {
     const [parent] = await browser.bookmarks.get(parentId)
 
     if (parent.title !== 'Pinboard' && !(await isInPinboardFolder(parentId))) {
       return
     }
 
-    console.log('removePinboardBookmark', {id, url})
-    await pinboardClient.deletePost(url)
-    delete cache[id]
+    console.log('removePinboardBookmark', {id, url, pinboardBookmark})
+
+    if (!pinboardBookmark) {
+      pinboardBookmark = await pinboardClient.getPost(url)
+      console.log('pinboardBookmark', pinboardBookmark)
+    }
+
+    if (!pinboardBookmark) {
+      delete cache[id]
+      return
+    }
+
+    const browserTag = parent.title
+    const pinboardTags = pinboardBookmark.tags.split(' ').filter(Boolean)
+
+    if (pinboardTags.size > 1 && pinboardTags.includes(browserTag)) {
+      pinboardBookmark.tags = pinboardTags.filter(t => t !== browserTag).join(' ')
+      await pinboardClient.addPost(pinboardBookmark)
+    } else {
+      await pinboardClient.deletePost(url)
+      delete cache[id]
+    }
   }
 
   const {pinboard_access_token} = await getAccessToken()
@@ -316,7 +343,7 @@ const ensureFolder = async (name, parentId) => {
   for (const b of pinboardBookmarks) {
     if (b.tags) {
       await Promise.all(
-        b.tags.split(' ').map(async tag => {
+        b.tags.split(' ').filter(Boolean).map(async tag => {
           const tagFolder = await ensureFolder(tag, pinboardFolder.id)
 
           return createBrowserBookmarkOrFolder({
@@ -341,5 +368,5 @@ const ensureFolder = async (name, parentId) => {
   browser.bookmarks.onCreated.addListener((...args) => createPinboardBookmark(...args).catch(console.error))
   browser.bookmarks.onMoved.addListener((...args) => updatePinboardBookmarkTags(...args).catch(console.error))
   browser.bookmarks.onChanged.addListener((...args) => updatePinboardBookmarkOrTag(...args).catch(console.error))
-  browser.bookmarks.onRemoved.addListener((...args) => removePinboardBookmark(...args).catch(console.error))
+  browser.bookmarks.onRemoved.addListener((...args) => removePinboardBookmarkOrTag(...args).catch(console.error))
 })()
